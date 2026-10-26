@@ -1,38 +1,55 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+#byte pair encoding
+import tiktoken
 
 # hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 256 # what is the maximum context length for predictions?
-max_iters = 5000
-eval_interval = 500
+# since we are using tiktoken we need to cut these down otherwise it will takes years for this
+batch_size = 4 # how many independent sequences will we process in parallel?
+block_size = 64 # what is the maximum context length for predictions?
+max_iters = 500
+eval_interval = 100
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 384
-n_head = 6
-n_layer = 6
+
+print("Device:", device)
+print("PyTorch:", torch.__version__)
+print("CUDA build:", torch.version.cuda)
+
+eval_iters = 10
+n_embd = 128
+n_head = 4
+n_layer = 2
 dropout = 0.2
 # ------------
 
 torch.manual_seed(1337)
 
 # wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-with open('input.txt', 'r', encoding='utf-8') as f:
+with open('chat.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 # here are all the unique characters that occur in this text
 chars = sorted(list(set(text)))
-vocab_size = len(chars)
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+# vocab_size = len(chars)
+
+# create a mapping from characters to integers // tokenising
+# basically creating a dictionary from the enumerated set
+# we dont need this if we will use tiktoken
+
+# stoi = { ch:i for i,ch in enumerate(chars) }
+# itos = { i:ch for i,ch in enumerate(chars) }
+# encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
+# decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+
+#this is the encoder used for gpt 2 // carries the decoder too
+encodingModel = tiktoken.get_encoding('gpt2')
+vocab_size = encodingModel.n_vocab
+
 
 # Train and test splits
-data = torch.tensor(encode(text), dtype=torch.long)
+data = torch.tensor(encodingModel.encode(text), dtype=torch.long)
 n = int(0.9*len(data)) # first 90% will be train, rest val
 train_data = data[:n]
 val_data = data[n:]
@@ -41,7 +58,9 @@ val_data = data[n:]
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
+    # we are getting ready to train it by making lots of different arrays of tokens, we do it randomly too
     ix = torch.randint(len(data) - block_size, (batch_size,))
+    # split into context block and target,  when the context block is something the target will be the next expected token     
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     x, y = x.to(device), y.to(device)
@@ -140,8 +159,14 @@ class GPTLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
+
+        #making the embedding table for training
+
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
+
+        # the embedding table is a table connecting a token to its next word, probability wise
+
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -161,6 +186,7 @@ class GPTLanguageModel(nn.Module):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
+        #this is where the training starts // backpropogation too
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
@@ -183,7 +209,7 @@ class GPTLanguageModel(nn.Module):
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
             idx_cond = idx[:, -block_size:]
-            # get the predictions
+            # sends the data in context blocks over to put into the embedding table
             logits, loss = self(idx_cond)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
@@ -221,5 +247,5 @@ for iter in range(max_iters):
 
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+print(encodingModel.decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 #open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
